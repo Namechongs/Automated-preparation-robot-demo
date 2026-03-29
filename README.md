@@ -1,0 +1,144 @@
+# 涂层配制系统
+
+基于PyQt5的自动化涂层配制控制系统，通过图形界面与机械臂、泵等设备交互，实现智能配方配制。
+
+## 功能特性
+
+- **智能配方生成**: 基于DeepSeek AI自动推理生成涂层配方
+- **多方案支持**: 支持生成多个配制方案供参考选择
+- **自动化执行**: 机械臂、泵、搅拌器协同工作，全流程自动化
+- **实时监控**: LED指示灯实时显示各模块运行状态
+- **模拟模式**: 无硬件环境下可进行完整流程测试
+
+## 系统要求
+
+- Python 3.8+
+- PyQt5
+- OpenAI SDK
+
+## 安装
+
+```bash
+pip install PyQt5 openai
+```
+
+## 项目结构
+
+```
+pyTest/
+├── main.py          # 主程序入口
+├── robot.py         # 机械臂控制模块
+├── main_ui.py       # UI界面代码
+├── main.ui          # Qt Designer界面文件
+└── dobot_api.py     # 机械臂API (需配合真机使用)
+```
+
+## 使用说明
+
+### 1. 启动程序
+
+```bash
+python main.py
+```
+
+### 2. 生成配方
+
+1. 在左侧输入框输入配制需求（如："配制防水涂层，需要耐高温"）
+2. 点击 **生成配方** 按钮
+3. 等待AI生成配方方案
+4. 在右侧查看生成的JSON配方
+
+### 3. 执行配方
+
+1. 确认配方内容无误
+2. 点击 **开始执行** 按钮
+3. 系统按步骤执行：
+   - 机械臂移动到烧杯位置
+   - 夹爪抓取烧杯
+   - 依次旋转到各泵位置接料
+   - 移动到搅拌台进行搅拌
+   - 移动到出料口完成出料
+   - 打印标签
+
+### 4. 模型切换
+
+点击 **切换模型** 按钮可在普通模型和推理模型之间切换。
+
+## 配置说明
+
+### 机械臂配置
+
+默认IP地址: `192.168.5.1`（可在 `main.py` 中修改）
+
+### 模拟模式
+
+默认启用模拟模式，用于无硬件测试。正式使用时修改 `main.py` 第199行：
+
+```python
+self.robot.start(sim=False)  # 关闭模拟，连接真机
+```
+
+### API配置
+
+默认使用DeepSeek API，API Key配置在 `main.py` 第14行。
+
+## 点位定义
+
+| 点位 | 说明 |
+|------|------|
+| safe | 机械臂初始安全位置 |
+| arm_start | 烧杯正后方等待位 |
+| arm_startforward | 烧杯夹取位 |
+| arm_startup | 夹取后抬起位 |
+| arm_stirup | 搅拌台上方过渡位 |
+| arm_stir | 搅拌台放置位 |
+| arm_endup | 出料口上方过渡位 |
+| arm_end | 出料口放置位 |
+| pump_1~4 | 4个泵的出料等待位 |
+
+## 输出示例
+
+系统输出的JSON格式：
+
+```json
+{
+  "task_name": "任务名称",
+  "requirement": "用户需求原文",
+  "formula_reasoning": "选料依据",
+  "plans": [
+    {
+      "plan_id": 1,
+      "plan_name": "方案A：xxx",
+      "stir_duration_seconds": 60,
+      "materials": [
+        {"pump_id": 1, "material": "材料1", "amount_ml": 100},
+        {"pump_id": 2, "material": "材料2", "amount_ml": 150}
+      ],
+      "steps": [...]
+    }
+  ]
+}
+```
+
+## 开发说明
+
+### 添加新的点位
+
+编辑 `robot.py` 中的 `POINT` 字典：
+
+```python
+'pump_5': [x, y, z, rx, ry, rz]
+```
+
+### 添加新的动作类型
+
+在 `robot.py` 的 `execute_step` 方法中添加：
+
+```python
+elif action == 'new_action':
+    # 处理逻辑
+```
+
+## 许可证
+
+MIT License
