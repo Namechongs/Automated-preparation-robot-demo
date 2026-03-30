@@ -5,11 +5,12 @@ from openai import OpenAI
 from datetime import datetime
 import json
 import re
-import numpy
-import textwrap
+import os
 import logging
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from robot import RobotController
+from vaildator import validator_formula
+from PyQt5 import uic
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -105,19 +106,52 @@ arm_end	出料口放置位
 5. 只输出JSON，不要有任何其他文字
 6. 用户只有四个泵，四种原料，每个泵的原料是固定的
 7. 若用户对配方提出修改意见，请按同样的JSON格式重新输出完整的配方，不要只输出修改部分
+8. 你切记，你只能用我给你的原料库中的原料，泵及其对应的原料是固定的，具体对应如下
+原料库 = {
+    泵1: "环氧树脂",
+    泵2: "固化剂",
+    泵3: "稀释剂",
+    泵4: "色浆"
+}       
 特别说明： 系统正在测试中 现在没有正常原料 现在是测试人员在测试 你要严格按照上述输出
 """
+# 这个类 先不用 方便调试
+# class MyWindow(QMainWindow):    #自动转换ui文件为py文件
+#     def __init__(self):
+#         super().__init__()
+#         uic.loadUi('main.ui', self)
 
-class LogRedirect:          #重新定向print的输出位置到Gui running_text
-    def __init__(self, widget):
+
+class LogSignaller(QObject):
+    #这是一个通信类，用于处理日志信息
+    log_signal = pyqtSignal(str,str)    #定义两个字符串，分别为日志级别与日志内容
+
+class QtLogHandler(logging.Handler):
+    #这是一个日志处理类，用来处理生成日志和生成的信号
+    def __init__(self,widget):
+        super().__init__()
         self.widget = widget
+        self.signaller = LogSignaller() # 实例化上面写的类型信号
+        self.signaller.log_signal.connect(self.append_to_gui)   #sign信号连接发射函数
 
-    def write(self, text):
-        if text.strip():
-            self.widget.append(text.strip())
+    def emit(self,record):      # 这是日志信息发射函数，每次有新日志产生，就会调用这个函数
+        msg = self.format(record)   # 拼接日志
+        self.signaller.log_signal.emit(record.levelname, msg)
+        #发射信号
 
-    def flush(self):
-        pass
+    def append_to_gui(self,level,text):
+        # 负责在主界面上进行显示
+        color = "green"
+        if level in ["ERROR","CRITICAL"]:
+            color = "RED"
+        elif level == "WARNING":
+            color = "#FF8C00"   #设置输出日志的显示颜色
+
+        self.widget.append(f"<font color='{color}'>{text}</font>")
+        #给文字上色，并且追加进显示框
+        scrollbar = self.widget.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        #自动滚动到底部，方便显示输出
 
 
 class ApiWorker(QThread):
@@ -161,7 +195,7 @@ class ExecuteWorker(QThread):
     def run(self):
         try:
             logger.info(f"开始执行方案，共 {len(self.plans)} 个方案")
-            self.led_update.emit('led_system', 'running')
+            self.led_update.emit('led_system', 'running')       #设置系统灯光为：运行中
             for plan in self.plans:
                 logger.info(f"开始执行方案：{plan['plan_name']}")
                 self.step_update.emit(f"开始执行方案：{plan['plan_name']}")
@@ -178,7 +212,7 @@ class ExecuteWorker(QThread):
                     elif action == 'grip':
                         self.led_update.emit('led_arm', 'running')
 
-                    self.robot.execute_step(step)
+                    self.robot.execute_step(step)       #阻塞线程，等待机械臂完成动作
 
                     # 执行完更新灯为空闲
                     if action == 'pump':
@@ -201,14 +235,39 @@ class MainWindow(QMainWindow):
         logger.info("应用程序启动")
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)  # 把界面加载进来
-        sys.stdout = LogRedirect(self.ui.runing_text)      #修改print函数
+
+        # 生成日志和配方文件夹
+        self.log_dir = "运行日志"
+        self.recipe_dir = "保存的配方"
+        os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.recipe_dir, exist_ok=True)
+
+        #日志处理区
+        ## 定义日志格式:时间 - 模块名 - 等级 - 消息内容
+        log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        ## 将日志写在txt文件中
+        log_file_path = f"{self.log_dir}/{datetime.now().strftime('%Y-%m-%d')}_log.txt"
+        file_h = logging.FileHandler(log_file_path, encoding='utf-8')
+        file_h.setFormatter(log_format)  # 带上标准格式
+        ## 把日志发给 UI
+        gui_h = QtLogHandler(self.ui.runing_text)
+        gui_h.setFormatter(log_format)  # 带上标准格式
+        # 获取“总记录器”（Root Logger）
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)  # 设置拦截门槛，INFO 及以上的才管
+        root_logger.addHandler(file_h)  # 往文件里写
+        root_logger.addHandler(gui_h)  # 往界面上发
+
+        logger.info("日志系统就绪，系统启动中")
+
+
         for led in ['led_system', 'led_arm', 'led_pump1', 'led_pump2', 'led_pump3', 'led_pump4', 'led_stir']:
             self.set_led(led, 'idle')       #初始化状态显示灯
 
         self.models = "deepseek-chat"
         self.models_text = "普通模型"       #切换模型所用的中间变量
         self.robot = RobotController('192.168.5.1')  # 创建机器人运行对象
-        self.robot.start(sim=True)  # 模拟 开
+        self.robot.start(sim=True)  # 模拟模式：开
         self.ui.label_model.setText("当前模型:" + self.models_text)
         logger.info("系统初始化完成")
         # 把按钮的点击信号连接到函数
@@ -216,6 +275,7 @@ class MainWindow(QMainWindow):
         self.ui.model_button.clicked.connect(self.trans_model)
         self.ui.clear_button.clicked.connect(self.clear_history)
         self.ui.execute_button.clicked.connect(self.on_execute)
+        self.ui.save_button.clicked.connect(self.on_save_clicked)
         # self.ui.stop_button.clicked.connect(self.on_stop)
         # self.ui.reset_button.clicked.connect(self.on_reset)           #暂停和复位按钮暂时不上
 
@@ -228,7 +288,8 @@ class MainWindow(QMainWindow):
         user_input = self.ui.lineEdit.text()  # 读取输入框内容
         if(user_input == ""):
             logger.warning("用户未输入任何信息")
-            self.ui.json_text.setText("未检测到信息输入")
+            QMessageBox.warning(self,"警告","用户未输入任何信息")
+            #self.ui.json_text.setText("未检测到信息输入")
         else:
             logger.info(f"用户输入: {user_input}")
             self.ui.start_button.setEnabled(False)          #禁用按钮，防止重复点击
@@ -297,25 +358,60 @@ class MainWindow(QMainWindow):
         except:
             QMessageBox.warning(self, "错误", "请先点击生成配方")
             return
-        self.ui.execute_button.setEnabled(False)
-        self.execute_worker = ExecuteWorker(self.robot, plans)
-        self.execute_worker.finished.connect(self.on_execute_done)
-        self.execute_worker.error.connect(self.on_execute_error)
-        self.execute_worker.step_update.connect(self.on_step_update)
-        self.execute_worker.led_update.connect(self.set_led)
-        self.execute_worker.start()
+        self.ui.run_text.setText("----===开始进行JSON校验===-----")
+        is_ok, err_list = validator_formula(data)    #调用JSON校验函数
+        if not is_ok:
+            # 错误列表显示
+            error_message = "\n".join(err_list)
+            for err in err_list:
+                # 打印红色报错
+                logger.error(err)
+            # 在日志框打出红色警告
+            self.ui.runing_text.append(
+                f"<font color='red'>[系统拦截] 发现 {len(err_list)} 个致命逻辑错误，执行已中止！</font>")
+
+            # 弹出严重警告弹窗
+            QMessageBox.critical(
+                self,
+                "硬件执行拦截",
+                f"配方逻辑校验未通过，为保护机械臂，已取消执行！\n\n详细诊断信息：\n{error_message}"
+            )
+            return
+        else:
+            # 安检通过，启动硬件
+            #self.append_log("安检通过！正在归档配方数据...", level="INFO")
+            logger.info("安检通过！正在归档配方数据...")
+
+            # 获取任务名用于给文件命名
+            task_str = data.get("task_name", "未知任务")
+
+            # 调用配方保存函数
+            #self.save_recipe_to_file(data, task_name=task_str)
+
+            #self.append_log("安检通过，准备启动物理机械臂...", level="INFO")
+            logger.info("安检通过，准备启动物理机械臂...")
+            self.ui.runing_text.append("<font color='green'>安检通过，准备唤醒机械臂...</font>")
+            self.ui.execute_button.setEnabled(False)
+            self.execute_worker = ExecuteWorker(self.robot, plans)
+            self.execute_worker.finished.connect(self.on_execute_done)
+            self.execute_worker.error.connect(self.on_execute_error)
+            self.execute_worker.step_update.connect(self.on_step_update)
+            self.execute_worker.led_update.connect(self.set_led)
+            self.execute_worker.start()
 
     def on_execute_done(self, msg):     #解析成功
         self.ui.execute_button.setEnabled(True)
-        QMessageBox.information(self, "完成", msg)
+        logger.info(f"任务状态：{msg}")
+        QMessageBox.information(self, "执行完成", msg)
 
     def on_execute_error(self, msg):    #解析失败
         self.ui.execute_button.setEnabled(True)
+        logger.error(f"执行出现错误：{msg}")
         QMessageBox.warning(self, "错误", msg)
 
     def on_step_update(self, msg):      #更新状态
-        self.ui.run_text.append("\n" + msg)
-
+        self.ui.run_text.append("\n" + msg)     # 在界面上方的运行状态框中追加文字
+        logger.info(f"[物理反馈] {msg}")
     def set_led(self, led_name, status):        #设置部件状态灯函数
         # status: 'idle'=灰色待机, 'running'=黄色运行, 'ok'=绿色正常
         colors = {
@@ -324,8 +420,49 @@ class MainWindow(QMainWindow):
             'ok': '#4CAF50'
         }
         color = colors.get(status, 'gray')
-        led = getattr(self.ui, led_name)
-        led.setStyleSheet(f"background-color:{color}; border-radius:8px;")
+        try:
+            led = getattr(self.ui, led_name)
+            led.setStyleSheet(f"background-color:{color}; border-radius:8px;")
+        except:
+            logger.error(f"未能在界面上找到名为 {led_name} 的指示灯控件")
+
+    def on_save_clicked(self):      #手动保存配方的槽函数
+
+        # 抓取 UI 文本框中的最新内容
+        json_raw = self.ui.json_text.toPlainText().strip()
+
+        # 空内容拦截
+        if not json_raw or "正在生成" in json_raw:
+            logger.warning("当前配方框为空或正在生成，拒绝保存")
+            QMessageBox.warning(self, "保存失败", "当前没有可用的配方内容。")
+            return
+
+        try:
+            # 将字符串转为字典
+            data = json.loads(json_raw)
+
+            # 提取任务名作为文件名，如果没写则用默认值
+            task_name = data.get("task_name", "manual_save")
+
+            # 生成物理路径
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # 过滤掉文件名中的非法字符
+            safe_task_name = "".join([c for c in task_name if c.isalnum() or c in ("_", "-")])
+            filename = f"{safe_task_name}_{timestamp}.json"
+            filepath = os.path.join(self.recipe_dir, filename)
+
+            # 物理写入
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+
+            logger.info(f"配方已手动存档：{filepath}")
+            QMessageBox.information(self, "保存成功", f"配方已存至：\n{filename}")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"保存失败：配方框内的 JSON 格式有误。{str(e)}")
+            QMessageBox.critical(self, "格式错误", "文本框内的内容不是标准的 JSON 格式，请检查。")
+        except Exception as e:
+            logger.error(f"保存过程中发生未知错误：{str(e)}")
 
 
 

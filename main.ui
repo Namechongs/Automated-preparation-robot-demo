@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>958</width>
-    <height>797</height>
+    <width>966</width>
+    <height>1059</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -20,7 +20,7 @@
       <x>11</x>
       <y>231</y>
       <width>471</width>
-      <height>521</height>
+      <height>771</height>
      </rect>
     </property>
     <property name="font">
@@ -218,7 +218,7 @@
    <widget class="QLabel" name="label_4">
     <property name="geometry">
      <rect>
-      <x>480</x>
+      <x>640</x>
       <y>230</y>
       <width>216</width>
       <height>59</height>
@@ -231,7 +231,7 @@
      </font>
     </property>
     <property name="text">
-     <string>状态显示：</string>
+     <string>状态显示</string>
     </property>
    </widget>
    <widget class="QLabel" name="label_3">
@@ -253,7 +253,7 @@
       <x>490</x>
       <y>620</y>
       <width>461</width>
-      <height>121</height>
+      <height>381</height>
      </rect>
     </property>
     <property name="font">
@@ -470,13 +470,32 @@
      </item>
     </layout>
    </widget>
+   <widget class="QPushButton" name="save_button">
+    <property name="geometry">
+     <rect>
+      <x>490</x>
+      <y>230</y>
+      <width>131</width>
+      <height>51</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <family>Adobe Arabic</family>
+      <pointsize>16</pointsize>
+     </font>
+    </property>
+    <property name="text">
+     <string>保存配方</string>
+    </property>
+   </widget>
   </widget>
   <widget class="QMenuBar" name="menubar">
    <property name="geometry">
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>958</width>
+     <width>966</width>
      <height>26</height>
     </rect>
    </property>

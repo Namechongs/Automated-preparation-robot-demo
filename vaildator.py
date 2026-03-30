@@ -1,15 +1,3 @@
-import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox
-from main_ui import Ui_MainWindow
-from openai import OpenAI
-from datetime import datetime
-import json
-import re
-# import numpy
-# import textwrap
-import logging
-from PyQt5.QtCore import QThread, pyqtSignal
-from robot import RobotController
 """
 JSON 校验模块：对 LLM 生成的配方 JSON 进行分层校验。
 顶层结构 -> plan 层 -> materials 局部 -> steps 层
@@ -21,9 +9,13 @@ all_materials = {
     2: "固化剂",
     3: "稀释剂",
     4: "色浆"
-}
+}       # 原料库
+all_target = ["safe","arm_start","arm_startforward","arm_startup","arm_stirup","arm_stir",
+              "arm_endup","arm_end","pump_1","pump_2","pump_3","pump_4"]    # 位置库
 
 all_amount = 400        #原料输出最大体积
+
+# pump_vaild_state = ["arm_startup","pump_1","pump_2","pump_3","pump_4"]
 
 def validator_formula(data):
     # 字典格式检查
@@ -39,7 +31,8 @@ def validator_formula(data):
     if missing_keys:
         error_msg = f"顶层关键信息缺失: {', '.join(missing_keys)}"
         error.append(error_msg)
-        print(f"顶层关键信息缺失，缺少的信息为{error}")
+        #print(f"顶层关键信息缺失，缺少的信息为{error}")
+        error.append(f"顶层关键信息缺失，缺少的信息为{error}")
         return False, error
 
     plans = data.get("plans")       # 检查plans的数据格式
@@ -50,11 +43,12 @@ def validator_formula(data):
         error.append("plans为空，请重新生成")
         return False, error
 
-    # === 第三层:遍历plans检查中最大的遍历 ===
+    # === 第三层:遍历plans，检查中最大的遍历 ===
     for plan in plans:
-        plan_name = plan.get('plan_name', '未命名')    #当前plan编号
+        has_cap = False  # 定义初始机械爪夹持状态
+        plan_name = "方案" + str(plan.get('plan_id', '未命名'))    #读取当前plan编号
         # print(plan_name)
-
+        stir_times = plan.get("stir_duration_seconds",0)    # 读取设定搅拌时间
         #err_cont = False        # 错误标志 已废弃
 
         amount_ml_all = 0       # 存储原料体积
@@ -103,23 +97,65 @@ def validator_formula(data):
             #err_cont = True，必须是列表")
             continue  # 跳过当前 plan 的后续检查
 
+        current_position = "safe"
         # 开始遍历每一个步骤
         for step in steps:
             step_id = step.get("step_id")
             action = step.get("action")
+            # 检查机械爪的夹持状态
+            if action == "grip":
+                state = step.get("state","")
+                if len(state) == 0:
+                    error.append(f"{plan_name}中步骤错误：第 {step_id} 步中，机械爪抓取指令为空")
+                elif state == "close":
+                    if has_cap == False:
+                        has_cap = True
+                    else:
+                        error.append(f"{plan_name}中步骤错误：第 {step_id} 步中，机械爪已经抓取了杯子")
+                elif state == "open":
+                    if has_cap == True:
+                        has_cap = False
+                    else:
+                        error.append(f"{plan_name}中步骤错误：第 {step_id} 步中，机械爪手上没有杯子")
 
-            # 我们重点检查动作是 'pump' 的步骤
-            if action == "pump":
+
+            # 检查 move 步骤
+            elif action == "move":
+                # 1. 先检查target是否为设置的位置
+                target = step.get("target","")
+                if len(target) == 0:
+                    error.append(f"{plan_name}中的步骤{step_id}中出现了空移动目标")
+                    #print(f"{plan_name}中的步骤{step_id}出现了空位置")
+                if target not in all_target:
+                    error.append(f"{plan_name}中的步骤{step_id}中出现了未定义移动目标")
+                    #print(f"{plan_name}中的步骤{step_id}中出现了未定义移动目标")
+                # 2. 构建一个虚拟机械臂
+                else:
+                    current_position = target   # 更新一下虚拟机器人位置
+
+
+            # 检查 pump 步骤
+            elif action == "pump":
                 s_pump_id = step.get("pump_id")
                 s_amount = step.get("amount_ml")
 
-                # 1. 检查步骤里的泵号，在物料清单里有没有提到过
+                # 1. 检查步骤中是否有空间冲突
+                expected_position = f"pump_{s_pump_id}"
+                if current_position != expected_position:
+                    error.append(
+                        f"{plan_name}中步骤{step_id}发生空间冲突！"
+                        f"试图让泵{s_pump_id}出料，但前一步把机械臂停在了 '{current_position}'，没有移动到 '{expected_position}'"
+                    )
+                if has_cap == False:
+                    error.append(f"{plan_name}中步骤错误：第 {step_id} 步中机械臂没有夹持容器")
+
+                # 2. 检查步骤里的泵号，在物料清单里有没有提到过
                 if s_pump_id not in materials_check_dict:
                     err_cont = True
                     error.append(f"{plan_name}中步骤错误：第 {step_id} 步使用了物料清单中未定义的泵 {s_pump_id}")
                 else:
-                    # 2. 对比两边的数值是否完全一致
-                    # materials_check_dict[s_pump_id] 是刚才在 materials 里记下的“标准值”
+                    # 3. 对比两边的数值是否完全一致
+                    # materials_check_dict[s_pump_id] 是在 materials 里记下的标准值
                     expected_amount = materials_check_dict[s_pump_id]
 
                     if s_amount != expected_amount:
@@ -129,24 +165,34 @@ def validator_formula(data):
                             f"但物料清单里写的是 {expected_amount}ml"
                         )
 
+            #检查stir的时间与状态
+            elif action == "stir":
+                times = step.get("duration_seconds")
+                if stir_times != times:
+                    error.append(f"{plan_name}中步骤错误：第 {step_id} 步搅拌时间{times}与设定的搅拌时间{stir_times}不符")
+                elif times == 0:
+                    error.append(f"{plan_name}中步骤错误：第 {step_id} 步搅拌时间为【0】 ")
+                elif has_cap:
+                    error.append(f"{plan_name}中步骤错误：第 {step_id} 步机械爪有容器")
+
     # 最终结果判断：只要 error 列表里有任何错误记录，就返回 False
-    is_ok = len(error) == 0
-    return is_ok, error
+    sys_cont = len(error) == 0
+    return sys_cont, error
 
 
 
 
-if __name__ == "__main__":
-    bad_data = {
-        "task_name": "格式测试",
-        "requirement": "测试 plans 类型",
-        "formula_reasoning": "因为我想测试",
-        "plans": "我是一段文字，不是列表"
-    }
-    is_ok,err_list = validator_formula(bad_data)
-    if not is_ok:
-        print(f"JSON不合格！！！！！！")
-        print(f"错误信息为： {err_list}")
-    else:
-        pass
+#if __name__ == "__main__":
+    # bad_data = {
+    #     "task_name": "格式测试",
+    #     "requirement": "测试 plans 类型",
+    #     "formula_reasoning": "因为我想测试",
+    #     "plans": "我是一段文字，不是列表"
+    # }
+    # is_ok,err_list = validator_formula(bad_data)
+    # if not is_ok:
+    #     print(f"JSON不合格！！！！！！")
+    #     print(f"错误信息为： {err_list}")
+    # else:
+    #     pass
     
