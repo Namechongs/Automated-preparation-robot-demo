@@ -50,7 +50,7 @@ def validator_formula(data):
         # print(plan_name)
         stir_times = plan.get("stir_duration_seconds",0)    # 读取设定搅拌时间
         #err_cont = False        # 错误标志 已废弃
-
+        has_printed = False     #设置打印初始状态
         amount_ml_all = 0       # 存储原料体积
         nothing_material = []   # 存储错误原料
         error_pumpid = []       # 大模型放置了错误原料的泵id
@@ -69,6 +69,8 @@ def validator_formula(data):
 
             if material not in all_materials.values():       # 记录没有的原材料
                 nothing_material.append(material)
+            if amount_ml <= 0:      # 检查输出的原料体积是否为负
+                error.append(f"{plan_name}参数错误：泵 {pump_id} 的出料量必须大于0，当前为 {amount_ml}")
 
         for p_id, p_mat in pump_material.items():   # 对比各个泵的原料和生成的的是否相符
             if p_id in all_materials:
@@ -98,6 +100,7 @@ def validator_formula(data):
             continue  # 跳过当前 plan 的后续检查
 
         current_position = "safe"
+        pumped_pumps = set()
         # 开始遍历每一个步骤
         for step in steps:
             step_id = step.get("step_id")
@@ -126,11 +129,19 @@ def validator_formula(data):
                 if len(target) == 0:
                     error.append(f"{plan_name}中的步骤{step_id}中出现了空移动目标")
                     #print(f"{plan_name}中的步骤{step_id}出现了空位置")
-                if target not in all_target:
+                elif target not in all_target:
                     error.append(f"{plan_name}中的步骤{step_id}中出现了未定义移动目标")
                     #print(f"{plan_name}中的步骤{step_id}中出现了未定义移动目标")
-                # 2. 构建一个虚拟机械臂
+                # 2. 防碰撞路径检查
                 else:
+                    if target == "arm_stir" and current_position != "arm_stirup":
+                        error.append(f"{plan_name}中步骤{step_id}路径危险：下降至搅拌台(arm_stir)前，必须先到达过渡位(arm_stirup)")
+                    elif target == "arm_end" and current_position != "arm_endup":
+                        error.append(f"{plan_name}中步骤{step_id}路径危险：下降至出料口(arm_end)前，必须先到达过渡位(arm_endup)")
+                    elif target == "arm_startup" and current_position != "arm_startforward":
+                        error.append(f"{plan_name}中步骤{step_id}路径危险：抬起烧杯前，必须处于夹取位(arm_startforward)")
+
+                    # 3. 构建一个虚拟机械臂
                     current_position = target   # 更新一下虚拟机器人位置
 
 
@@ -164,6 +175,10 @@ def validator_formula(data):
                             f"指令冲突：第 {step_id} 步要求泵 {s_pump_id} 出料 {s_amount}ml，"
                             f"但物料清单里写的是 {expected_amount}ml"
                         )
+                # 4. 记录该泵已经出过料了
+                pumped_pumps.add(s_pump_id)
+
+
 
             #检查stir的时间与状态
             elif action == "stir":
@@ -175,6 +190,27 @@ def validator_formula(data):
                 elif has_cap:
                     error.append(f"{plan_name}中步骤错误：第 {step_id} 步机械爪有容器")
 
+            elif action == "print":
+                # 检查打印动作
+                has_printed = True
+                content = step.get("content", "")
+                if not content:
+                    error.append(f"{plan_name}中步骤错误：第 {step_id} 步打印内容为空")
+        # 检查打印动作是否执行
+        if not has_printed:
+            error.append(f"{plan_name}流程缺失：未执行标签打印(print)动作")
+
+        # 检查是否所有清单里的泵都出过料了
+        missing_pumps = set(materials_check_dict.keys()) - pumped_pumps
+        if missing_pumps:
+            error.append(f"{plan_name}逻辑不完整：物料清单中要求了泵 {missing_pumps}，但在步骤中未执行出料")
+
+        # 检查末端行为状态
+        if has_cap:
+            error.append(f"{plan_name}结束状态危险：所有步骤执行完毕后，机械爪未松开(依然夹持容器)")
+        if current_position != "safe":
+            error.append(
+                f"{plan_name}结束状态危险：所有步骤执行完毕后，机械臂未返回安全点(safe)，停留在 {current_position}")
     # 最终结果判断：只要 error 列表里有任何错误记录，就返回 False
     sys_cont = len(error) == 0
     return sys_cont, error
