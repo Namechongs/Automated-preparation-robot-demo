@@ -268,7 +268,7 @@ class Ui_MainWindow(object):
         self.model_button.setText(_translate("MainWindow", "切换模型"))
         self.clear_button.setText(_translate("MainWindow", "清除对话记忆"))
         self.label_4.setText(_translate("MainWindow", "状态显示"))
-        self.label_3.setText(_translate("MainWindow", "作者 王喜泽"))
+        self.label_3.setText(_translate("MainWindow", "作者 王"))
         self.led_system.setText(_translate("MainWindow", "系统"))
         self.led_arm.setText(_translate("MainWindow", "机械臂"))
         self.led_stir.setText(_translate("MainWindow", "搅拌器"))
