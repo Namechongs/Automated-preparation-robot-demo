@@ -10,17 +10,19 @@ import logging
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from robot import RobotController
 from vaildator import validator_formula
-from PyQt5 import uic
+from vaildator import all_materials
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 client = OpenAI(
-     api_key="你的API SDk",
+     api_key="some",
      base_url="https://api.deepseek.com"
 )
 
-sys_text = """
+sim = True
+materials_desc = "\n".join([f"    泵{k}: \"{v}\"" for k, v in all_materials.items()])
+sys_text_template = """
 你是一个专业的涂层配制专家，根据用户需求推理配方并输出JSON。
 
 点位定义	点位名说明
@@ -108,13 +110,16 @@ arm_end	出料口放置位
 7. 若用户对配方提出修改意见，请按同样的JSON格式重新输出完整的配方，不要只输出修改部分
 8. 你切记，你只能用我给你的原料库中的原料，泵及其对应的原料是固定的，具体对应如下
 原料库 = {
-    泵1: "环氧树脂",
-    泵2: "固化剂",
-    泵3: "稀释剂",
-    泵4: "色浆"
-}       
+{{MATERIAL_LIBRARY}}
+}
 特别说明： 系统正在测试中 现在没有正常原料 现在是测试人员在测试 你要严格按照上述输出
 """
+
+
+# 实际使用的提示词
+sys_text = sys_text_template.replace("{{MATERIAL_LIBRARY}}", materials_desc)
+
+
 # 这个类 先不用 方便调试
 # class MyWindow(QMainWindow):    #自动转换ui文件为py文件
 #     def __init__(self):
@@ -236,6 +241,8 @@ class MainWindow(QMainWindow):
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)  # 把界面加载进来
 
+        self.auto_correct_count = 0     #定义自动纠错计数器
+
         # 生成日志和配方文件夹
         self.log_dir = "运行日志"
         self.recipe_dir = "保存的配方"
@@ -267,7 +274,7 @@ class MainWindow(QMainWindow):
         self.models = "deepseek-chat"
         self.models_text = "普通模型"       #切换模型所用的中间变量
         self.robot = RobotController('192.168.5.1')  # 创建机器人运行对象
-        self.robot.start(sim=True)  # 模拟模式：开
+        self.robot.start(sim)  # 模拟模式的开关
         self.ui.label_model.setText("当前模型:" + self.models_text)
         logger.info("系统初始化完成")
         # 把按钮的点击信号连接到函数
@@ -291,8 +298,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self,"警告","用户未输入任何信息")
             #self.ui.json_text.setText("未检测到信息输入")
         else:
+            self.auto_correct_count = 0     # 开始时计数器清零
+
             logger.info(f"用户输入: {user_input}")
-            self.ui.start_button.setEnabled(False)          #禁用按钮，防止重复点击
+            self.ui.start_button.setEnabled(False)          # 禁用按钮，防止重复点击
             self.ui.json_text.setText("正在生成配方，请稍候...")
             self.chat_history.append({"role": "user", "content": user_input})     #历史消息
             self.worker = ApiWorker(client, self.models, self.chat_history)     #调用子线程，传参
@@ -301,33 +310,86 @@ class MainWindow(QMainWindow):
             self.worker.error.connect(self.on_api_error)
             # 启动子线程
             self.worker.start()
-            # response = client.chat.completions.create(  # 开始调用deepseek
-            #     model=self.models,
-            #     messages=self.chat_history  #发送历史消息
-            # )
-            # #reasoning = response.choices[0].message.reasoning_content   #提取思考信息
-            # result = response.choices[0].message.content  # 提取消息文字
-            # result = re.sub(r'```json|```', '', result).strip()  # 清洗markdown标记
-            # try:
-            #     data = json.loads(result)  # 解析成字典
-            #     data["created_at"] = datetime.now().isoformat()     #时间
-            #     self.chat_history.append({"role": "assistant", "content": result})  #添加历史信息
-            #     self.ui.json_text.setText(json.dumps(data, ensure_ascii=False, indent=2))  # 显示到文本框
-            # except:
-            #     self.ui.json_text.setText("JSON解析失败，原始输 出为：\n" + result)
-    def on_api_success(self,result):
-        #API调用成功函数
+
+    def on_api_success(self, result):
+        # API调用成功函数
         result = re.sub(r'```json|```', '', result).strip()  # 清洗markdown标记
+
+        # 解析并调用validator_formula安检
         try:
-            data = json.loads(result)  # 解析成字典
-            data["created_at"] = datetime.now().isoformat()     #时间
-            self.chat_history.append({"role": "assistant", "content": result})  #添加历史信息
-            data_show = json.dumps(data, ensure_ascii=False, indent=2)
-            self.ui.json_text.setText(data_show)  # 显示到文本框
-            self.ui.start_button.setEnabled(True)  # 开启按钮
-        except:
-            self.ui.json_text.setText("JSON解析失败，原始输出为：\n" + result)
-            self.ui.start_button.setEnabled(True)  # 开启按钮
+            data = json.loads(result)
+            data["created_at"] = datetime.now().isoformat()     # 得到时间信息，放在json里面
+
+            # 从检验函数中拿到错误信息
+            is_ok, err_list = validator_formula(data)
+
+        except json.JSONDecodeError as e:   # 从系统中得到json解析失败的原因
+            is_ok = False
+            err_list = [f"JSON格式解析失败，请严格输出合法的JSON格式。具体错误：{str(e)}"]
+        except Exception as e:
+            is_ok = False
+            err_list = [f"系统发生未知解析异常：{str(e)}"]
+
+        # 安检未通过，触发纠错或熔断
+        if not is_ok:
+            self.auto_correct_count += 1
+            error_msg = "\n".join(err_list)  # 将错误列表拼接成字符串
+
+            # 1. 触发熔断：错误超过3次，停机报警
+            if self.auto_correct_count >= 3:
+                # 发起警报
+                logger.error(f"[最高警报] 模型连续 {self.auto_correct_count} 次生成存在物理冲突的配方！")
+                logger.error("自动纠错已失效。为保护硬件，系统已强制停止运行。")
+                for err in err_list:
+                    logger.error(f"拦截详情：{err}")
+
+                QMessageBox.critical(
+                    self,
+                    "最高警报 - 阻断执行",
+                    f"模型连续 {self.auto_correct_count} 次生成存在物理冲突的配方！\n"
+                    f"为保护硬件，系统已强制停止。\n\n"
+                    f"最后一次拦截的致命错误：\n{error_msg}"
+                )
+                self.auto_correct_count = 0  # 报警后清零计数器
+                self.ui.start_button.setEnabled(True)
+                return
+
+            # 2. 触发纠错：调用logger.warning
+            logger.warning(f"[系统消息] 检测到逻辑冲突，第 {self.auto_correct_count} 次自动纠错...")
+            for err in err_list:
+                logger.warning(f"检测到物理冲突：{err}")
+
+            # 在左侧的 JSON 框里提示正在等待
+            self.ui.json_text.setText(
+                f"配方存在逻辑冲突，正在请求 AI 进行第 {self.auto_correct_count} 次深度纠错，请稍候...\n\n错误详情：\n{error_msg}")
+
+            # 把查出的错，喂给AI
+            self.chat_history.append({"role": "assistant", "content": result})  # 把它刚才写错的 JSON 存进去
+            correction_prompt = (
+                f"你刚才生成的配方未能通过系统物理安全校验，包含以下致命错误：\n"
+                f"{error_msg}\n\n"
+                f"请作为专业的控制算法专家，严格根据上述报错逐一修改配方，修正空间冲突与步骤遗漏，"
+                f"并重新输出一个完整的、可直接执行的JSON。切记只输出JSON格式代码，不要包含任何解释文字。"
+            )
+            self.chat_history.append({"role": "user", "content": correction_prompt})  # 运行
+
+            # 重新启动多线程发起API请求
+            self.worker = ApiWorker(client, self.models, self.chat_history)
+            self.worker.finished.connect(self.on_api_success)
+            self.worker.error.connect(self.on_api_error)
+            self.worker.start()
+            return
+
+        # 3. 安检通过
+        self.auto_correct_count = 0  # 计数器复位
+        self.chat_history.append({"role": "assistant", "content": result})
+
+        # 调用logger.info
+        logger.info("[系统消息] 配方生成完毕且通过安全校验！")
+
+        data_show = json.dumps(data, ensure_ascii=False, indent=2)
+        self.ui.json_text.setText(data_show)
+        self.ui.start_button.setEnabled(True)
 
     def on_api_error(self,error_msg):
         # API调用失败
@@ -345,7 +407,8 @@ class MainWindow(QMainWindow):
         self.ui.label_model.setText("当前模型:"+self.models_text)
 
     def clear_history(self):
-        #对话清除函数
+        #对话与计数器清除函数
+        self.auto_correct_count = 0     # 计数器清零
         self.chat_history = [{"role": "system", "content": sys_text}]
         self.ui.json_text.clear()
         self.ui.lineEdit.clear()
@@ -355,7 +418,7 @@ class MainWindow(QMainWindow):
         try:
             data = json.loads(self.ui.json_text.toPlainText())
             plans = data['plans']
-        except:
+        except (json.JSONDecodeError, KeyError):
             QMessageBox.warning(self, "错误", "请先点击生成配方")
             return
         self.ui.run_text.setText("----===开始进行JSON校验===-----")
@@ -379,14 +442,7 @@ class MainWindow(QMainWindow):
             return
         else:
             # 安检通过，启动硬件
-            #self.append_log("安检通过！正在归档配方数据...", level="INFO")
             logger.info("安检通过！正在归档配方数据...")
-
-            # 获取任务名用于给文件命名
-            task_str = data.get("task_name", "未知任务")
-
-            # 调用配方保存函数
-            #self.save_recipe_to_file(data, task_name=task_str)
 
             #self.append_log("安检通过，准备启动物理机械臂...", level="INFO")
             logger.info("安检通过，准备启动物理机械臂...")

@@ -1,3 +1,4 @@
+
 """
 JSON 校验模块：对 LLM 生成的配方 JSON 进行分层校验。
 顶层结构 -> plan 层 -> materials 局部 -> steps 层
@@ -31,8 +32,7 @@ def validator_formula(data):
     if missing_keys:
         error_msg = f"顶层关键信息缺失: {', '.join(missing_keys)}"
         error.append(error_msg)
-        #print(f"顶层关键信息缺失，缺少的信息为{error}")
-        error.append(f"顶层关键信息缺失，缺少的信息为{error}")
+        # print(f"顶层关键信息缺失，缺少的信息为{error}")
         return False, error
 
     plans = data.get("plans")       # 检查plans的数据格式
@@ -183,11 +183,11 @@ def validator_formula(data):
             #检查stir的时间与状态
             elif action == "stir":
                 times = step.get("duration_seconds")
+                if times == 0:
+                    error.append(f"{plan_name}中步骤错误：第 {step_id} 步搅拌时间为【0】 ")
                 if stir_times != times:
                     error.append(f"{plan_name}中步骤错误：第 {step_id} 步搅拌时间{times}与设定的搅拌时间{stir_times}不符")
-                elif times == 0:
-                    error.append(f"{plan_name}中步骤错误：第 {step_id} 步搅拌时间为【0】 ")
-                elif has_cap:
+                if has_cap:
                     error.append(f"{plan_name}中步骤错误：第 {step_id} 步机械爪有容器")
 
             elif action == "print":
