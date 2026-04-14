@@ -9,110 +9,121 @@ import os
 import logging
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from robot import RobotController
-from vaildator import validator_formula
-from vaildator import all_materials
+from vaildator import validator_formula, MATERIAL_CONFIG
+import serial.tools.list_ports
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
+API_KEY = os.getenv("DEEPSEEK_API_KEY")
 client = OpenAI(
-     api_key="替换成你的key",
+     api_key=API_KEY,
      base_url="https://api.deepseek.com"
 )
 
 sim = True
-materials_desc = "\n".join([f"    泵{k}: \"{v}\"" for k, v in all_materials.items()])
+# 原料库
+materials_desc = "\n".join([
+    f"    泵{k}: \"{v['name']}\" (占总量比例 {int(v['ratio_min']*100)}%~{int(v['ratio_max']*100)}%)"
+    for k, v in MATERIAL_CONFIG.items()
+])
 sys_text_template = """
 你是一个专业的涂层配制专家，根据用户需求推理配方并输出JSON。
 
-点位定义	点位名说明
-safe	机械臂初始安全位置，所有动作的起点与回程中转点
-arm_start	烧杯正后方等待位
-arm_startforward	前移至烧杯夹取位（与烧杯对齐）
-arm_startup	夹取烧杯后垂直抬起位pump1 ~ pump4各泵出料等待位（沿圆弧排布，对应J2不同角度）
-arm_stirup	搅拌台正上方过渡位
-arm_stir	搅拌台放置位
-arm_endup	出料口正上方过渡位
-arm_end	出料口放置位
+点位定义    点位名说明
+safe    机械臂初始安全位置，所有动作的起点与回程中转点
+arm_start   烧杯正后方等待位
+arm_startforward    前移至烧杯夹取位（与烧杯对齐）
+arm_startup 夹取烧杯后垂直抬起位
+pump_1 ~ pump_4 各泵出料等待位（沿圆弧排布，对应J2不同角度）
+arm_stirup  搅拌台正上方过渡位
+arm_stir    搅拌台放置位
+arm_endup   出料口正上方过渡位
+arm_end 出料口放置位
 
-执行流程
-① 初始化
-机械臂运动至 safe 位置，系统就绪。
-② 抓取烧杯
-移动至 arm_start → 前移至 arm_startforward，触发夹爪夹紧信号 → 垂直抬起至 arm_startup。
-③ 依次接料
-根据 LLM 生成的 JSON 配方，提取需要的泵编号与用量。按顺序旋转 J2 关节，将烧杯依次移动至对应泵出料位（pump1～pump4）。到位后触发泵出料信号，等待出料完成（按流量换算等待时间），接料过程中可适当倾斜烧杯防止液体迸溅。出料完成后旋转 J2 移至下一个泵，重复直至所有原料添加完毕。最后一种原料接完后，将烧杯回正。
-④ 送至搅拌台
-移动至 arm_stirup（搅拌台上方过渡位）→ 直线下降至 arm_stir → 触发夹爪松开信号，将烧杯放置在搅拌台上 → 触发搅拌器启动信号 → 机械臂退回 safe 等待。
-⑤ 搅拌完成后取杯出料
-搅拌器发送完成信号，机械臂从 safe 出发 → 移至 arm_stir 夹取烧杯 → 抬起至 arm_stirup → 移动至 arm_endup（出料口上方）→ 直线下降至 arm_end，触发夹爪松开，完成出料。
-⑥ 打印标签
-触发打印机信号，打印本次配制的标签信息。
-⑦ 回程
-机械臂从 arm_end 抬起至 arm_endup → 退回 safe → 返回步骤②，进行下一次配制任务。
+原子动作指令集（Action Space）：
+你可以组合以下动作来规划复杂的配制任务。
+
+move: 移动到指定点位。参数: target (点位名)
+
+grip: 控制夹爪。参数: state ("close" 或 "open")
+
+pump: 控制蠕动泵出料。参数: pump_id (1-4), amount_ml (数字)
+
+stir: 启动磁力搅拌器。参数: duration_seconds (数字), speed_rpm (数字)
+
+
+执行流程约束：
+① 必须以 safe 移动起手，依次经过 arm_start -> arm_startforward -> 夹爪 close -> arm_startup 抓取烧杯。
+② 动态加料与搅拌：你可以自由规划加料顺序。可以去 pump_x 接料，也可以中途将烧杯送到 arm_stir 放下并执行 stir 动作（需设定时间和转速）。如果需要分段加料，搅拌完成后需重新夹取烧杯，抬起至 arm_stirup，再移动到新的 pump_x 接料。接料和搅拌可根据配方逻辑交替进行。
+③ 配制完成后出料：将烧杯移至 arm_end 放下，夹爪 open。
+④ 归位：机械臂退回 safe 结束任务。
 
 你必须严格按照以下JSON格式输出，不要输出任何JSON以外的内容，不要加markdown代码块，不要加任何解释：
 
 {
-  "task_name": "任务名称",
-  "requirement": "用户需求原文",
-  "formula_reasoning": "整体选料依据",
-  "plans": [
-    {
-      "plan_id": 1,
-      "plan_name": "方案A：xxx",
-      "plan_reasoning": "该方案的具体理由",
-      "stir_duration_seconds": 数字,
-      "materials": [
-        {"pump_id": 1, "material": "材料名1", "amount_ml": 数量},
-        {"pump_id": 2, "material": "材料名2", "amount_ml": 数量},
-        {"pump_id": 3, "material": "材料名3", "amount_ml": 数量},
-        {"pump_id": 4, "material": "材料名4", "amount_ml": 数量}
-      ],
-      "steps": [
-        {"step_id": 1,  "action": "move",  "target": "safe"},
-        {"step_id": 2,  "action": "move",  "target": "arm_start"},
-        {"step_id": 3,  "action": "move",  "target": "arm_startforward"},
-        {"step_id": 4,  "action": "grip",  "state": "close"},
-        {"step_id": 5,  "action": "move",  "target": "arm_startup"},
-        {"step_id": 6,  "action": "move",  "target": "pump_1"},
-        {"step_id": 7,  "action": "pump",  "pump_id": 1, "amount_ml": 与materials一致},
-        {"step_id": 8,  "action": "move",  "target": "pump_2"},
-        {"step_id": 9,  "action": "pump",  "pump_id": 2, "amount_ml": 与materials一致},
-        {"step_id": 10, "action": "move",  "target": "pump_3"},
-        {"step_id": 11, "action": "pump",  "pump_id": 3, "amount_ml": 与materials一致},
-        {"step_id": 12, "action": "move",  "target": "pump_4"},
-        {"step_id": 13, "action": "pump",  "pump_id": 4, "amount_ml": 与materials一致},
-        {"step_id": 14, "action": "move",  "target": "arm_stirup"},
-        {"step_id": 15, "action": "move",  "target": "arm_stir"},
-        {"step_id": 16, "action": "grip",  "state": "open"},
-        {"step_id": 17, "action": "stir",  "duration_seconds": 与stir_duration_seconds一致},
-        {"step_id": 18, "action": "move",  "target": "arm_stir"},
-        {"step_id": 19, "action": "grip",  "state": "close"},
-        {"step_id": 20, "action": "move",  "target": "arm_stirup"},
-        {"step_id": 21, "action": "move",  "target": "arm_endup"},
-        {"step_id": 22, "action": "move",  "target": "arm_end"},
-        {"step_id": 23, "action": "grip",  "state": "open"},
-        {"step_id": 24, "action": "print", "content": "label"},
-        {"step_id": 25, "action": "move",  "target": "safe"}
-      ]
-    }
-  ]
+"task_name": "任务名称 要详细简短",
+"requirement": "用户需求原文",
+"formula_reasoning": "整体选料依据 如果你校验后才通过 此处必须加上选料依据 不要写系统校验要求 按原始要求写",
+"plans": [
+{
+"plan_id": 1,
+"plan_name": "方案A：xxx",
+"plan_reasoning": "该方案的具体理由",
+"materials": [
+{"pump_id": 1, "material": "材料名1", "total_amount_ml": 数量, "add_order": 1},
+{"pump_id": 2, "material": "材料名2", "total_amount_ml": 数量, "add_order": 2}
+],
+"steps": [
+{"step_id": 1,  "action": "move",  "target": "safe"},
+{"step_id": 2,  "action": "move",  "target": "arm_start"},
+...
+{"step_id": N,  "action": "pump",  "pump_id": 1, "amount_ml": 50},
+...
+{"step_id": M,  "action": "stir",  "duration_seconds": 数字, "speed_rpm": 数字},
+...
+{"step_id": K,  "action": "pump",  "pump_id": 2, "amount_ml": 30},
+...     
+{"step_id": K,  "action": "move",  "target": "arm_endup"},
+{"step_id": K,  "action": "move",  "target": "arm_end"},
+...
+]
+}
+]
 }
 
 注意事项：
-1. 只使用pump_id 1到4，最多用4种原料
-2. 生成多个方案，每个方案配比、配方可以不同，方案数量由你决定，但是不要超过五个
-3. amount_ml总量不超过400ml
-4. steps里的amount_ml必须和materials里对应pump的amount_ml完全一致
-5. 只输出JSON，不要有任何其他文字
-6. 用户只有四个泵，四种原料，每个泵的原料是固定的
-7. 若用户对配方提出修改意见，请按同样的JSON格式重新输出完整的配方，不要只输出修改部分
-8. 你切记，你只能用我给你的原料库中的原料，泵及其对应的原料是固定的，具体对应如下
+
+只使用pump_id 1到4，最多用4种原料
+
+生成多个方案，每个方案配比、配方可以不同，方案数量由你决定，但是不要超过五个
+
+方案内各 pump_id 在 steps 中分配的 amount_ml 总和，必须与 materials 数组中对应 pump_id 的 total_amount_ml 完全一致。总量不超过100ml。
+
+只输出JSON，不要有任何其他文字。
+
+助剂配料的比例要低，大约在1%到10%
+
+每个方案中，各原料的 total_amount_ml 除以该方案总量，必须严格落在原料库中标注的比例区间内，否则系统会拒绝执行。请在生成前自己验算一遍。
+
+move到arm_end之后，离开时第一步必须是move到arm_endup，不允许直接跳转到其他位置。
+
+丙烯酸乳液（泵1）必须是steps中最后一个pump动作，泵1出料后不允许出现任何其他pump动作。
+
+消光剂+消泡剂（泵2）每次pump之后，在下一个pump动作之前，必须有stir动作，而且消光剂+消泡剂不可以作为第一个添加的试剂
+
+materials中列出的每个泵，total_amount_ml必须大于0，不使用的泵不要写进materials。
+
+搅拌前必须严格按以下顺序：
+move arm_stirup → move arm_stir → grip open → stir → move arm_stirup → move arm_stir → grip close → move arm_stirup
+
+出料口必须严格按以下顺序：
+move arm_endup → move arm_end → grip open → move arm_endup → move safe
+
+只使用原料库中的原料，泵及其对应的原料是固定的，具体对应如下：
 原料库 = {
 {{MATERIAL_LIBRARY}}
 }
-特别说明： 系统正在测试中 现在没有正常原料 现在是测试人员在测试 你要严格按照上述输出
+特别说明： 系统正在测试中，现在没有正常原料，现在是测试人员在测试，你要严格按照上述输出。
 """
 
 
@@ -247,8 +258,8 @@ class MainWindow(QMainWindow):
         self.log_dir = "运行日志"
         self.recipe_dir = "保存的配方"
         os.makedirs(self.log_dir, exist_ok=True)
-        os.makedirs(self.recipe_dir, exist_ok=True)
-
+        os.makedirs(self.recipe_dir, exist_ok=True)     # 写文件
+        self.refresh_ports()    # 刷新串口信息
         #日志处理区
         ## 定义日志格式:时间 - 模块名 - 等级 - 消息内容
         log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -271,10 +282,9 @@ class MainWindow(QMainWindow):
         for led in ['led_system', 'led_arm', 'led_pump1', 'led_pump2', 'led_pump3', 'led_pump4', 'led_stir']:
             self.set_led(led, 'idle')       #初始化状态显示灯
 
-        self.models = "deepseek-chat"
-        self.models_text = "普通模型"       #切换模型所用的中间变量
-        self.robot = RobotController('192.168.5.1')  # 创建机器人运行对象
-        self.robot.start(sim)  # 模拟模式的开关
+        self.models = "deepseek-reasoner"
+        self.models_text = "推理模型"       #切换模型所用的中间变量
+        self.robot = RobotController('192.168.5.1', simulate=sim)  # 创建机器人运行对象
         self.ui.label_model.setText("当前模型:" + self.models_text)
         logger.info("系统初始化完成")
         # 把按钮的点击信号连接到函数
@@ -283,12 +293,55 @@ class MainWindow(QMainWindow):
         self.ui.clear_button.clicked.connect(self.clear_history)
         self.ui.execute_button.clicked.connect(self.on_execute)
         self.ui.save_button.clicked.connect(self.on_save_clicked)
+        # 选串口的信号连接到函数
+        self.ui.combo_port_pump.currentTextChanged.connect(self.on_port_changed)
+        self.ui.combo_port_stir.currentTextChanged.connect(self.on_port_changed)
+        # 用当前选中的值初始化一次
+        self.on_port_changed()
         # self.ui.stop_button.clicked.connect(self.on_stop)
         # self.ui.reset_button.clicked.connect(self.on_reset)           #暂停和复位按钮暂时不上
+
+
 
         self.chat_history = [
             {"role": "system", "content": sys_text}  # 提示词
         ]
+
+    def refresh_ports(self):  # 串口初始化，寻找串口
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        self.ui.combo_port_pump.clear()
+        self.ui.combo_port_stir.clear()
+        if ports:
+            self.ui.combo_port_pump.addItems(ports)
+            self.ui.combo_port_stir.addItems(ports)
+        else:
+            self.ui.combo_port_pump.addItem("无可用串口")
+            self.ui.combo_port_stir.addItem("无可用串口")
+
+    def on_port_changed(self):
+        port_pump = self.ui.combo_port_pump.currentText()
+        port_stir = self.ui.combo_port_stir.currentText()
+        self.robot.start(port_pump, port_stir)
+
+    def closeEvent(self, event):        # 停止函数
+        # 先停线程
+        if hasattr(self, 'worker') and self.worker.isRunning():
+            self.worker.terminate()
+            self.worker.wait()
+        if hasattr(self, 'execute_worker') and self.execute_worker.isRunning():
+            self.execute_worker.terminate()
+            self.execute_worker.wait()
+        # 停硬件
+        self._shutdown_hardware()
+
+        logger.info("程序正常退出")
+        event.accept()
+
+    def _shutdown_hardware(self):
+        try:
+            self.robot.shutdown()
+        except Exception as e:
+            logger.error(f"硬件关机异常: {e}")
 
     def on_start(self):
         # 这里写点击按钮之后的逻辑

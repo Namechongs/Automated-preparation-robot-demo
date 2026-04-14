@@ -3,8 +3,6 @@
 基于PyQt5的自动化涂层配制控制系统，通过图形界面与机械臂、泵等设备交互，实现智能配方配制。
 ## 作者：NameChong 王
 
-#### 更新日期:2026.3.31 1:21
-
 ## 功能特性
 
 - **智能配方生成**: 基于DeepSeek AI自动推理生成涂层配方
@@ -65,7 +63,6 @@ python main.py
    - 依次旋转到各泵位置接料
    - 移动到搅拌台进行搅拌
    - 移动到出料口完成出料
-   - 打印标签
 
 ### 4. 保存配方
 
@@ -79,14 +76,16 @@ python main.py
 
 系统固定使用4个泵，对应4种原料：
 
-| 泵编号 | 原料 |
-|--------|------|
-| 泵1 | 环氧树脂 |
-| 泵2 | 固化剂 |
-| 泵3 | 稀释剂 |
-| 泵4 | 色浆 |
+| 泵编号 | 原料 | 比例范围 | 特性 |
+|--------|------|----------|------|
+| 泵1 | 丙烯酸乳液 | 40%-70% | 必须最后加入 |
+| 泵2 | 消光剂+消泡剂 | 5%-15% | 加入后需搅拌 |
+| 泵3 | 炭黑分散液 | 10%-25% | - |
+| 泵4 | 去离子水 | 10%-30% | - |
 
-单次配制总量不超过400ml。
+单次配制总量不超过100ml。
+
+**JSON格式要求**：materials数组中需包含add_order字段表示加入顺序，数字越小越先加入。
 
 ## 配置说明
 
@@ -134,16 +133,26 @@ self.robot.start(sim=False)  # 关闭模拟，连接真机
       "plan_id": 1,
       "plan_name": "方案A：xxx",
       "plan_reasoning": "该方案的具体理由",
-      "stir_duration_seconds": 60,
       "materials": [
-        {"pump_id": 1, "material": "环氧树脂", "amount_ml": 100},
-        {"pump_id": 2, "material": "固化剂", "amount_ml": 150}
+        {"pump_id": 1, "material": "丙烯酸乳液", "total_amount_ml": 60, "add_order": 2},
+        {"pump_id": 2, "material": "消光剂+消泡剂", "total_amount_ml": 10, "add_order": 1},
+        {"pump_id": 3, "material": "炭黑分散液", "total_amount_ml": 15, "add_order": 3},
+        {"pump_id": 4, "material": "去离子水", "total_amount_ml": 15, "add_order": 4}
       ],
-      "steps": [...]
+      "steps": [
+        {"step_id": 1, "action": "move", "target": "safe"},
+        {"step_id": 2, "action": "move", "target": "arm_start"},
+        ...
+      ]
     }
   ]
 }
 ```
+
+**说明**：
+- `add_order`: 表示原料加入顺序，数字越小越先加入
+- `total_amount_ml`: 该原料的总加入量
+- 系统会自动校验比例是否在允许范围内、加入顺序是否正确、是否按要求最后加入等
 
 ## 开发说明
 
@@ -166,17 +175,23 @@ elif action == 'new_action':
 
 ### 添加新的原料
 
-编辑 `vaildator.py` 中的 `all_materials` 字典：
+编辑 `vaildator.py` 中的 `MATERIAL_CONFIG` 字典：
 
 ```python
-all_materials = {
-    1: "环氧树脂",
-    2: "固化剂",
-    3: "稀释剂",
-    4: "色浆",
-    5: "新原料"
+MATERIAL_CONFIG = {
+    1: {"name": "丙烯酸乳液", "ratio_min": 0.40, "ratio_max": 0.70, "solid_content": 1.0, "must_be_last": True, "need_stir_after": False},
+    2: {"name": "消光剂+消泡剂", "ratio_min": 0.05, "ratio_max": 0.15, "solid_content": 1.0, "must_be_last": False, "need_stir_after": True},
+    5: {"name": "新原料", "ratio_min": 0.05, "ratio_max": 0.20, "solid_content": 0.5, "must_be_last": False, "need_stir_after": False}
 }
 ```
+
+### 新增校验函数
+
+validator.py提供三个独立校验函数：
+
+- `check_ratio(materials, plan_name, total_ml)`: 检查原料比例是否在允许范围内
+- `check_add_order(steps, pump_order_map, plan_name)`: 检查加入顺序是否与add_order一致
+- `check_must_be_last(steps, pump_order_map, plan_name)`: 检查must_be_last原料是否最后加入
 
 ## 许可证
 
@@ -192,6 +207,7 @@ MIT License
 - 3.28 完成json校验功能
 - 3.30 完成了历史记录功能
 - 3.31 完成自动纠错与计数功能，实现智能熔断保护机制
+- 4.x 完成配方校验系统升级：新增比例校验、加入顺序校验、必须最后加入校验、搅拌时机校验
 
 ## 待完成
 
