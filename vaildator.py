@@ -280,12 +280,13 @@ def validator_formula(data):
                         if f_action == "stir":
                             found_stir = True
                             break
-                    if not found_stir:
+                    has_future_pump = any(s.get("action") == "pump" for s in steps[idx + 1:])       # 后面还有其他pump动作时才stir
+                    if has_future_pump and not found_stir:
                         error.append(f"{plan_name}中步骤{step_id}未在泵出料后进行搅拌（泵{s_pump_id}需要在下一次出料前搅拌）")
 
 
 
-            #检查stir的时间与状态
+            # 检查stir的时间与状态
             elif action == "stir":
                 duration = step.get("duration_seconds",0)
                 speed = step.get("speed_rpm",0)
@@ -314,7 +315,7 @@ def validator_formula(data):
             actual_total = accumulated_pump_amounts.get(p_id, 0)
 
             # 最后时刻，对比大模型规划的总抽料量，和配方要求的总量是否一致
-            if actual_total != expected_total:
+            if abs(actual_total - expected_total) > 0.01:
                 error.append(
                     f"{plan_name}物料不守恒：清单要求泵{p_id}总计输出 {expected_total}ml，但在实际执行序列中总计输出了 {actual_total}ml")
     # 最终结果判断：只要 error 列表里有任何错误记录，就返回 False

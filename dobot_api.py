@@ -234,6 +234,13 @@ class DobotApiDashboard(DobotApi):
             parts.append(f"{k}={self._fmt(v)}")
         return f"{name}(" + ",".join(parts) + ")"
 
+    def Sync(self):     # 手动添加
+        """
+        【已废弃】 V4 标准同步指令：阻塞程序，直到算法队列中在此指令之前下发的所有运动指令执行完成。
+        """
+        string = "Sync()"
+        return self.sendRecvMsg(string)
+
     def EnableRobot(self, load=0.0, centerX=0.0, centerY=0.0, centerZ=0.0, isCheck=-1,):
         """
             可选参数
